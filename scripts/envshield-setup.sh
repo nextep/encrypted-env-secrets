@@ -205,6 +205,12 @@ handle_key() {
 store_key() {
     step "Storing Master Key"
 
+    # Map wizard mode to runtime config mode
+    local config_mode="$SELECTED_MODE"
+    if [ "$config_mode" = "cicd" ]; then
+        config_mode="env"
+    fi
+
     case "$SELECTED_MODE" in
         tpm)
             info "Sealing key into TPM 2.0..."
@@ -261,6 +267,12 @@ store_key() {
             warn "Do NOT commit this file. Add it to .gitignore."
             ;;
     esac
+
+    # Write the config file so the runtime knows which source to use
+    mkdir -p "$ENVSHIELD_DIR"
+    echo "{\"mode\": \"$config_mode\"}" > "$ENVSHIELD_DIR/config"
+    chmod 600 "$ENVSHIELD_DIR/config"
+    info "Configuration saved to $ENVSHIELD_DIR/config (mode=$config_mode)"
 }
 
 # ---------------------------------------------------------------------------

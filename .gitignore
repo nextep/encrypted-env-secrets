@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# C / C++ Build Artifacts
+*.o
+*.a
+*.so
+test_envshield
+test_c
+
+# EnvShield Artifacts
+*.key
+.env
+.env.enc
+.env.bak
+env-shield.key
+github_integration.md.resolved
+tests_execution_report.md.resolved
+
+# IDEs
+.vscode/
+.idea/
+pyrightconfig.json
+
+# OS files
+.DS_Store

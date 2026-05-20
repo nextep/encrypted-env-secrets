@@ -30,20 +30,21 @@ EnvShield was built to kill this attack vector dead:
 │   .env (plaintext)                                               │
 │       │                                                          │
 │       ▼                                                          │
-│   envshield-cli.py --store github "ghp_..."                      │
-│       │                                                          │
-│       ├──► ~/.envshield/github.enc   (AES-256-GCM ciphertext)    │
-│       └──► OS Keyring                (master key, encrypted)     │
+│   envshield-cli.py .env  →  .env.enc (AES-256-GCM ciphertext)   │
+│   setup wizard           →  ~/.envshield/config  {"mode":"tpm"}  │
+│                          →  Master key → TPM / Keyring / file    │
 │                                                                  │
 │   ┌─── Your Application ────────────────────────────────────┐    │
 │   │  import envshield                                       │    │
 │   │  api_key = os.environ['SECRET_API_KEY']                 │    │
 │   │           │                                             │    │
 │   │           ▼                                             │    │
-│   │  1. Check OS keyring for master key                     │    │
-│   │  2. If ENV_SHIELD_KEY in env → read + memset(0)         │    │
-│   │  3. Decrypt ciphertext JIT via libcrypto ctypes          │    │
-│   │  4. Return plaintext (never stored persistently)        │    │
+│   │  1. Read ~/.envshield/config → determine PK source      │    │
+│   │  2. Fetch PK from configured source (tpm/keyring/env)  │    │
+│   │  3. Decrypt ciphertext JIT via native libcrypto GCM     │    │
+│   │  4. Wipe ENV_SHIELD_KEY from /proc (if env mode)        │    │
+│   │  5. memset(0) the PK bytes from process memory          │    │
+│   │  6. Return plaintext (key material destroyed)           │    │
 │   └─────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -105,14 +106,16 @@ import os
 api_key = os.environ['SECRET_API_KEY']
 ```
 
-The interceptor resolves the master key using this priority chain:
+The master key source is determined by `~/.envshield/config` (written by the setup wizard):
 
-| Priority | Source | Use Case |
-|----------|--------|----------|
-| 1 | `env-shield.key` file | Project-local key, paired with local `.env.enc` |
-| 2 | `ENV_SHIELD_KEY` env var | CI/CD runners (auto-wiped from memory after read) |
-| 3 | OS Keyring / TPM | Global key store (workstations, locked-down servers) |
-| 4 | Colab `userdata` | Google Colab notebooks |
+| Mode | Config Value | Source | Use Case |
+|------|-------------|--------|----------|
+| TPM 2.0 | `{"mode": "tpm"}` | Hardware-sealed blob via `tpm2_unseal` | Production workstations, locked-down servers |
+| OS Keyring | `{"mode": "keyring"}` | GNOME Keyring / macOS Keychain / Windows Cred Locker | Desktops with session-encrypted keystores |
+| Env Var | `{"mode": "env"}` | `ENV_SHIELD_KEY` (auto-wiped from `/proc` after read) | CI/CD runners (GitHub Actions, GitLab CI, Jenkins) |
+| File | `{"mode": "file"}` | Local `env-shield.key` file | Development / testing only |
+
+> Set `ENVSHIELD_DEBUG=1` for detailed step-by-step logging to stderr.
 
 ### 3. Decrypt in Node.js
 
@@ -202,21 +205,39 @@ wipe_environ_key('GITHUB_TOKEN')
 
 ---
 
-## Master Key Storage: The Priority Chain
+## Master Key Storage
 
-EnvShield resolves the master key using a strict, defense-in-depth priority chain:
+The master key source is **explicitly configured** — EnvShield does not guess.  The setup wizard writes `~/.envshield/config` with the selected mode.
 
-### 1. TPM 2.0 (Hardware-Backed — Strongest)
+### Configuration File
 
-If a TPM 2.0 chip and `tpm2-tools` are available, EnvShield seals the master key directly to the hardware's Storage Root Key (SRK).  The sealed blob is stored at `~/.envshield/tpm/<service>/` and can **only** be unsealed on the same physical machine.
+```json
+// ~/.envshield/config
+{"mode": "tpm"}
+```
+
+Valid modes: `tpm`, `keyring`, `env`, `file`.
+
+### Runtime Lifecycle
+
+Every time your application reads an encrypted variable, EnvShield executes this exact sequence:
+
+1. **Load** `.env.enc` ciphertext into memory.
+2. **Read** `~/.envshield/config` to determine the PK source.
+3. **Fetch** the master key from the configured source only.
+4. **Decrypt** the ciphertext JIT via native libcrypto AES-256-GCM.
+5. **Wipe** `ENV_SHIELD_KEY` from `/proc/<pid>/environ` (if env mode — `memset` to null bytes).
+6. **Destroy** the master key bytes from process memory (`memset(0)` on the mutable buffer).
+7. **Return** the plaintext.  Key material no longer exists in the process.
+
+### Mode Details
+
+#### TPM 2.0 (Hardware-Backed — `{"mode": "tpm"}`)
+
+Seals the master key to the TPM's Storage Root Key (SRK).  Only unsealable on the same physical machine.
 
 ```bash
-# Install TPM tools (Ubuntu/Debian):
-sudo apt install tpm2-tools
-
-# EnvShield automatically uses TPM if /dev/tpmrm0 exists.
-# No extra flags needed — it's the highest-priority backend.
-python3 cli/envshield-cli.py --store github "ghp_..."
+sudo apt install tpm2-tools   # Ubuntu/Debian
 ```
 
 | Property | Detail |
@@ -228,7 +249,7 @@ python3 cli/envshield-cli.py --store github "ghp_..."
 
 > **Recovery:** If the TPM is cleared or the hardware changes, the sealed key is irrecoverable.  Use `--file` to create an offline backup before provisioning.
 
-### 2. OS Software Keyring
+#### OS Software Keyring (`{"mode": "keyring"}`)
 
 | Platform | Backend | Command |
 |----------|---------|--------|
@@ -236,28 +257,24 @@ python3 cli/envshield-cli.py --store github "ghp_..."
 | macOS | Keychain via `security` | `security find-generic-password -s envshield -w` |
 | Windows | Credential Locker via `advapi32.dll` | `CredReadW` / `CredWriteW` |
 
-The CLI stores keys here by default when TPM is unavailable.  No files.  No env vars.  The key material is managed by the OS kernel's credential subsystem.
+#### Environment Variable (`{"mode": "env"}`)
 
-### 3. Environment Variable (CI/CD Fallback)
-
-In headless environments (GitHub Actions, GitLab CI, Jenkins), inject the key via:
+For headless CI/CD.  EnvShield reads `ENV_SHIELD_KEY` **once**, then `memset`s the raw C environ block to null bytes.
 
 ```yaml
 env:
   ENV_SHIELD_KEY: ${{ secrets.ENV_SHIELD_KEY }}
 ```
 
-EnvShield reads it **once**, then immediately wipes it from the process environ block.
+#### File Fallback (`{"mode": "file"}`)
 
-### 4. File Fallback (Development Only)
-
-For local development, pass `--file` to the CLI:
+For local development only.  Writes `env-shield.key` to the working directory.
 
 ```bash
 python3 cli/envshield-cli.py --file .env
 ```
 
-This writes `env-shield.key`.  **Do not commit this file.**  Add it to `.gitignore`.
+**Do not commit this file.**  Add it to `.gitignore`.
 
 ---
 
