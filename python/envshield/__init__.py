@@ -4,10 +4,10 @@ envshield — Zero-dependency JIT environment variable decryption.
 Transparently intercepts os.environ lookups and decrypts AES-256-GCM
 ciphertexts on the fly. The master key is resolved from (in order):
 
-    1. The OS-native secure keyring (GNOME Keyring / macOS Keychain / Windows Credential Locker)
+    1. A local env-shield.key file (project-specific, paired with .env.enc)
     2. The ENV_SHIELD_KEY environment variable (wiped from /proc after read)
-    3. Google Colab's userdata API
-    4. A local env-shield.key file (development fallback only)
+    3. The OS-native secure keyring / TPM (global key store)
+    4. Google Colab's userdata API
 
 Import this module once at the top of your application to activate the
 interceptor.  No pip packages required — relies exclusively on the
@@ -88,19 +88,17 @@ def _get_master_key():
     """
     Resolves the 32-byte AES-256 master key using a strict priority chain:
 
-    1. OS Keyring        — production-grade, backed by the kernel credential store.
+    1. env-shield.key    — project-local file, paired with local .env.enc.
     2. ENV_SHIELD_KEY    — CI/CD fallback; immediately wiped from /proc after read.
-    3. Colab userdata    — Google Colab's encrypted secrets API.
-    4. env-shield.key    — local file; development/testing convenience only.
+    3. OS Keyring / TPM  — global key store, backed by the kernel credential store.
+    4. Colab userdata    — Google Colab's encrypted secrets API.
     """
 
-    # --- 1. Try the OS secure keyring first (preferred) ---
-    try:
-        key_hex = keyring.get_key(_KEYRING_SERVICE)
-        if key_hex:
-            return bytes.fromhex(key_hex)
-    except Exception:
-        pass
+    # --- 1. Local key file (project-specific, paired with local .env.enc) ---
+    key_path = os.path.join(os.getcwd(), 'env-shield.key')
+    if os.path.exists(key_path):
+        with open(key_path, 'r') as f:
+            return bytes.fromhex(f.read().strip())
 
     # --- 2. Environment variable (CI/CD path) ---
     if 'ENV_SHIELD_KEY' in os.environ:
@@ -109,24 +107,26 @@ def _get_master_key():
         wipe_environ_key('ENV_SHIELD_KEY')
         return key
 
-    # --- 3. Google Colab userdata API ---
+    # --- 3. OS secure keyring / TPM (global key store) ---
     try:
-        from google.colab import userdata
+        key_hex = keyring.get_key(_KEYRING_SERVICE)
+        if key_hex:
+            return bytes.fromhex(key_hex)
+    except Exception:
+        pass
+
+    # --- 4. Google Colab userdata API ---
+    try:
+        from google.colab import userdata  # type: ignore
         key_hex = userdata.get('ENV_SHIELD_KEY')
         if key_hex:
             return bytes.fromhex(key_hex)
     except ImportError:
         pass
 
-    # --- 4. Local key file (dev fallback) ---
-    key_path = os.path.join(os.getcwd(), 'env-shield.key')
-    if os.path.exists(key_path):
-        with open(key_path, 'r') as f:
-            return bytes.fromhex(f.read().strip())
-
     raise RuntimeError(
         "EnvShield: master key not found.\n"
-        "Checked: OS keyring, ENV_SHIELD_KEY, Colab userdata, ./env-shield.key\n"
+        "Checked: ./env-shield.key, ENV_SHIELD_KEY, OS keyring/TPM, Colab userdata\n"
         "Run `envshield-cli.py --store <service> <token>` to provision a key."
     )
 

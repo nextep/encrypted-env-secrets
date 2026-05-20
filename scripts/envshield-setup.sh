@@ -220,9 +220,9 @@ store_key() {
             echo -n "$MASTER_KEY_HEX" > "$data_file"
             chmod 600 "$data_file"
 
-            tpm2_createprimary -C o -c "$primary_ctx" 2>/dev/null
-            tpm2_create -C "$primary_ctx" -i "$data_file" -u "$key_pub" -r "$key_priv" 2>/dev/null
-            tpm2_load -C "$primary_ctx" -u "$key_pub" -r "$key_priv" -c "$key_ctx" 2>/dev/null
+            tpm2_createprimary -C o -c "$primary_ctx" &>/dev/null
+            tpm2_create -C "$primary_ctx" -i "$data_file" -u "$key_pub" -r "$key_priv" &>/dev/null
+            tpm2_load -C "$primary_ctx" -u "$key_pub" -r "$key_priv" -c "$key_ctx" &>/dev/null
 
             rm -f "$data_file" "$primary_ctx"
 

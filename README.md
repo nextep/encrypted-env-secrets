@@ -109,10 +109,10 @@ The interceptor resolves the master key using this priority chain:
 
 | Priority | Source | Use Case |
 |----------|--------|----------|
-| 1 | OS Keyring | Production (workstations, locked-down servers) |
+| 1 | `env-shield.key` file | Project-local key, paired with local `.env.enc` |
 | 2 | `ENV_SHIELD_KEY` env var | CI/CD runners (auto-wiped from memory after read) |
-| 3 | Colab `userdata` | Google Colab notebooks |
-| 4 | `env-shield.key` file | Local development / testing only |
+| 3 | OS Keyring / TPM | Global key store (workstations, locked-down servers) |
+| 4 | Colab `userdata` | Google Colab notebooks |
 
 ### 3. Decrypt in Node.js
 
